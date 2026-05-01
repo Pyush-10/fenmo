@@ -7,8 +7,4 @@ services:
     startCommand: npm start
     envVars:
       - key: EXPENSES_DB_FILE
-        value: /var/data/expenses.db
-    disk:
-      name: fenmo-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: ./expenses.db
