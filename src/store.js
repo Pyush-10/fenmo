@@ -1,33 +1,16 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { DatabaseSync } = require("node:sqlite");
 
-const DATA_FILE =
-  process.env.EXPENSES_DATA_FILE ||
-  path.join(__dirname, "..", "data", "expenses.json");
-const DATA_DIR = path.dirname(DATA_FILE);
+const DB_FILE =
+  process.env.EXPENSES_DB_FILE || path.join(__dirname, "..", "data", "expenses.db");
+const DATA_DIR = path.dirname(DB_FILE);
 
-function ensureDataFile() {
+function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-
-  if (!fs.existsSync(DATA_FILE)) {
-    const initial = { expenses: [], idempotency: {} };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(initial, null, 2), "utf-8");
-  }
-}
-
-function readData() {
-  ensureDataFile();
-  const raw = fs.readFileSync(DATA_FILE, "utf-8");
-  return JSON.parse(raw);
-}
-
-function writeData(data) {
-  const tempPath = `${DATA_FILE}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf-8");
-  fs.renameSync(tempPath, DATA_FILE);
 }
 
 function toMinorUnits(amount) {
@@ -88,18 +71,50 @@ function validateExpense(input) {
   };
 }
 
+ensureDataDir();
+const db = new DatabaseSync(DB_FILE);
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT PRIMARY KEY,
+    amount_minor INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL,
+    date TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT PRIMARY KEY,
+    expense_id TEXT NOT NULL REFERENCES expenses(id)
+  );
+`);
+
+const findExpenseByIdStmt = db.prepare(
+  "SELECT id, amount_minor, category, description, date, created_at FROM expenses WHERE id = ?",
+);
+const findIdempotencyStmt = db.prepare(
+  "SELECT expense_id FROM idempotency_keys WHERE key = ?",
+);
+const insertExpenseStmt = db.prepare(
+  "INSERT INTO expenses (id, amount_minor, category, description, date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+);
+const insertIdempotencyStmt = db.prepare(
+  "INSERT INTO idempotency_keys (key, expense_id) VALUES (?, ?)",
+);
+
 function createExpense(payload, idempotencyKey) {
   const checked = validateExpense(payload);
   if (checked.error) {
     return { error: checked.error };
   }
 
-  const data = readData();
-  if (idempotencyKey && data.idempotency[idempotencyKey]) {
-    const expenseId = data.idempotency[idempotencyKey];
-    const existing = data.expenses.find((e) => e.id === expenseId);
-    if (existing) {
-      return { expense: existing, replay: true };
+  if (idempotencyKey) {
+    const known = findIdempotencyStmt.get(idempotencyKey);
+    if (known?.expense_id) {
+      const existing = findExpenseByIdStmt.get(known.expense_id);
+      if (existing) {
+        return { expense: existing, replay: true };
+      }
     }
   }
 
@@ -108,35 +123,70 @@ function createExpense(payload, idempotencyKey) {
     ...checked.value,
     created_at: new Date().toISOString(),
   };
-  data.expenses.push(expense);
 
-  if (idempotencyKey) {
-    data.idempotency[idempotencyKey] = expense.id;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    insertExpenseStmt.run(
+      expense.id,
+      expense.amount_minor,
+      expense.category,
+      expense.description,
+      expense.date,
+      expense.created_at,
+    );
+    if (idempotencyKey) {
+      insertIdempotencyStmt.run(idempotencyKey, expense.id);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback errors when transaction did not start
+    }
+    if (idempotencyKey && /UNIQUE constraint failed: idempotency_keys.key/.test(String(error))) {
+      const known = findIdempotencyStmt.get(idempotencyKey);
+      if (known?.expense_id) {
+        const existing = findExpenseByIdStmt.get(known.expense_id);
+        if (existing) {
+          return { expense: existing, replay: true };
+        }
+      }
+    }
+    throw error;
   }
 
-  writeData(data);
   return { expense, replay: false };
 }
 
 function listExpenses({ category, sort }) {
-  const data = readData();
-  let items = data.expenses.slice();
+  const filters = [];
+  const params = [];
 
   if (category) {
-    const normalized = String(category).trim().toLowerCase();
-    items = items.filter((e) => e.category.toLowerCase() === normalized);
+    filters.push("LOWER(category) = LOWER(?)");
+    params.push(String(category).trim());
   }
 
-  if (sort === "date_desc") {
-    items.sort((a, b) => {
-      if (a.date === b.date) {
-        return b.created_at.localeCompare(a.created_at);
-      }
-      return b.date.localeCompare(a.date);
-    });
-  }
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const orderClause =
+    sort === "date_desc" ? "ORDER BY date DESC, created_at DESC" : "ORDER BY created_at DESC";
 
-  const totalMinor = items.reduce((acc, item) => acc + item.amount_minor, 0);
+  const rows = db
+    .prepare(
+      `SELECT id, amount_minor, category, description, date, created_at
+       FROM expenses
+       ${whereClause}
+       ${orderClause}`,
+    )
+    .all(...params);
+
+  const totalRow = db
+    .prepare(`SELECT COALESCE(SUM(amount_minor), 0) AS total FROM expenses ${whereClause}`)
+    .get(...params);
+  const totalMinor = totalRow.total;
+
+  const items = rows;
   return { items, totalMinor };
 }
 

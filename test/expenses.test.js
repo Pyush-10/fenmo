@@ -7,8 +7,8 @@ const request = require("supertest");
 
 function createAppForTest() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "expense-tracker-"));
-  const dataFile = path.join(tempDir, "expenses.json");
-  process.env.EXPENSES_DATA_FILE = dataFile;
+  const dbFile = path.join(tempDir, "expenses.db");
+  process.env.EXPENSES_DB_FILE = dbFile;
 
   delete require.cache[require.resolve("../src/store")];
   delete require.cache[require.resolve("../src/server")];

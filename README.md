@@ -11,6 +11,11 @@ npm start
 
 Open [http://localhost:3000](http://localhost:3000).
 
+Optional env vars:
+
+- `PORT` (default `3000`)
+- `EXPENSES_DB_FILE` (default `./data/expenses.db`)
+
 ## API
 
 ### `POST /expenses`
@@ -58,21 +63,35 @@ Response includes:
 
 ## Design decisions
 
-- **Persistence**: JSON file (`data/expenses.json`) for simplicity and easy local setup, while still surviving server restarts and page refreshes.
+- **Persistence**: SQLite database file (`data/expenses.db`) with table-based schema and transactional writes.
 - **Money correctness**: amounts stored in minor units (`amount_minor`, paise) to avoid floating-point rounding issues.
 - **Retry safety**: idempotent `POST /expenses` using `Idempotency-Key` mapping so duplicate submits/retries are safe.
 - **Resilience UX**: frontend keeps a pending request id in `localStorage` so retries use the same key and do not duplicate rows.
 
 ## Trade-offs (timebox)
 
-- Used JSON-file persistence instead of SQLite/Postgres. This keeps setup minimal but is less suitable for concurrent multi-process writes.
+- SQLite keeps setup simple and durable for single-instance deployments, but this is not a horizontally scaled multi-instance architecture.
 - Auth, pagination, and richer reporting were intentionally left out to keep the assignment focused.
 
 ## Intentionally not done
 
 - No user accounts or multi-tenant data isolation.
 - No advanced category analytics UI (beyond list total).
-- No deployment config (Docker/cloud) in this iteration.
+- No multi-region or distributed database setup.
+
+## Deploy (Render)
+
+1. Push repository to GitHub.
+2. In Render: create a **Web Service** from the repo.
+3. Configure:
+   - Build command: `npm install`
+   - Start command: `npm start`
+4. Add a **Persistent Disk** (for example mounted at `/var/data`).
+5. Add environment variable:
+   - `EXPENSES_DB_FILE=/var/data/expenses.db`
+6. Deploy and verify:
+   - `GET /health`
+   - create/list/filter/sort flows from the UI
 
 ## Tests
 
